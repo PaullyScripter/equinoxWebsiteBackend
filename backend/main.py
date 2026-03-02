@@ -40,7 +40,7 @@ load_dotenv(BASE_DIR / ".env")
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDEEM_CODE_PEPPER = os.getenv("REDEEM_CODE_PEPPER")
 DEV_ID = 857932717681147954
-pending_batches: dict[str, dict] = {}  # token -> {tier, codes, created_at}
+pending_batches: dict[str, dict] = {}  
 
 
 def get_db():
@@ -72,7 +72,7 @@ def db_user_is_active(discord_id: str):
 
     tier, expires = row
 
-    # normalize tz
+    
     if expires is not None and getattr(expires, "tzinfo", None) is None:
         expires = expires.replace(tzinfo=timezone.utc)
 
@@ -100,12 +100,12 @@ if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET or not DISCORD_REDIRECT_UR
 app = FastAPI()
 
 FRONTEND_ORIGINS = [
-    "http://localhost:5500",                 # local dev
+    "http://localhost:5500",                 
     "https://equinoxbot.netlify.app"
 ]
 
 
-# allow your Netlify site to talk to this backend
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
@@ -144,10 +144,10 @@ if discord_rate_limited_until and discord_rate_limited_until > now:
         detail={"message": "Server temporarily rate-limited by Discord.", "retry_after": retry_secs},
         headers={"Retry-After": str(retry_secs)},
     )
-# 1. AT THE TOP OF YOUR FILE (Global State)
+
 discord_rate_limited_until: datetime | None = None
 
-# 2. HELPER TO CHECK COOLDOWN (Add this)
+
 def check_discord_cooldown():
     global discord_rate_limited_until
     if discord_rate_limited_until:
@@ -160,7 +160,7 @@ def check_discord_cooldown():
                 detail={"message": "Global Discord Cooldown", "retry_after": retry_secs}
             )
         else:
-            discord_rate_limited_until = None # Cooldown expired
+            discord_rate_limited_until = None 
 
 
 @app.get("/auth/discord/callback")
@@ -169,7 +169,7 @@ async def discord_callback(
     state: str | None = None,
     error: str | None = None,
 ):
-    # Access the global variable defined at the top of your file
+    
     global discord_rate_limited_until
 
     if error:
@@ -180,7 +180,7 @@ async def discord_callback(
 
     now = datetime.now(timezone.utc)
 
-    # --- FIX 1: STRICT GLOBAL COOLDOWN CHECK ---
+    
     if discord_rate_limited_until and discord_rate_limited_until > now:
         retry_secs = int((discord_rate_limited_until - now).total_seconds())
         print(f"🛑 [BLOCKING] Discord call prevented. Global cooldown active for {retry_secs}s")
@@ -190,14 +190,14 @@ async def discord_callback(
             headers={"Retry-After": str(retry_secs)},
         )
         
-    # 1. Cleanup old entries
+    
     expiry_limit = now - timedelta(minutes=10)
     for k in [k for k, v in used_oauth_codes.items() if v < expiry_limit]:
         used_oauth_codes.pop(k, None)
     for k in [k for k, v in used_oauth_states.items() if v < expiry_limit]:
         used_oauth_states.pop(k, None)
     
-    # 2. Check if the current code/state was recently used
+    
     if code in used_oauth_codes:
         print(f"⚠️ [DEBUG] Code {code[:5]}... already processed recently. Redirecting.")
         return RedirectResponse(FRONTEND_URL)
@@ -206,7 +206,7 @@ async def discord_callback(
         print(f"⚠️ [DEBUG] State {state} invalid or already used. Redirecting.")
         return RedirectResponse(FRONTEND_URL)
     
-    # 3. Mark as used
+    
     used_oauth_codes[code] = now
     used_oauth_states[state] = now
 
@@ -215,7 +215,7 @@ async def discord_callback(
 
     try:
         async with httpx.AsyncClient() as client:
-            # --- CALL 1: TOKEN EXCHANGE ---
+            
             print("🚀 [DISCORD CALL] Exchanging code for token...")
             token_res = await client.post(
                 "https://discord.com/api/oauth2/token",
@@ -237,7 +237,7 @@ async def discord_callback(
                 except Exception:
                     retry_after = 60
             
-                # --- FIX 2: UPDATE GLOBAL COOLDOWN ---
+                
                 discord_rate_limited_until = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
                 print(f"❌ [RATE LIMIT] Discord 429 received. Locking calls for {retry_after}s")
             
@@ -253,7 +253,7 @@ async def discord_callback(
             token_res.raise_for_status()
             access_token = token_res.json()["access_token"]
 
-            # --- CALL 2: GET USER ---
+            
             print("🚀 [DISCORD CALL] Fetching user profile...")
             user_res = await client.get(
                 "https://discord.com/api/users/@me",
@@ -270,11 +270,16 @@ async def discord_callback(
         raise HTTPException(status_code=500, detail="Communication with Discord failed.")
 
     session_id = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO public.web_sessions (session_id, user_json) VALUES (%s, %s)",
-                (session_id, json.dumps(user)),
+                """
+                INSERT INTO public.web_sessions (session_id, user_json, csrf_token)
+                VALUES (%s, %s, %s)
+                """,
+                (session_id, json.dumps(user), csrf_token),
             )
         conn.commit()
 
@@ -284,9 +289,18 @@ async def discord_callback(
         key="session_id",
         value=session_id,
         httponly=True,
-        secure=is_prod,
-        samesite="none",
-        max_age=604800, # 7 days
+        secure=True,
+        samesite="lax",
+        max_age=604800,
+    )
+
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="lax",
+        max_age=604800,
     )
 
     return response
@@ -297,7 +311,7 @@ def make_avatar_url(user: dict) -> str:
     if avatar_hash:
         ext = "gif" if avatar_hash.startswith("a_") else "png"
         return f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.{ext}?size=128"
-    # default avatar
+    
     discrim = int(user.get("discriminator", "0")) % 5
     return f"https://cdn.discordapp.com/embed/avatars/{discrim}.png"
 
@@ -318,10 +332,10 @@ def get_user_from_session(request: Request) -> dict | None:
     if not row:
         return None
 
-    # row[0] may already be dict depending on driver; handle both
+    
     return row[0] if isinstance(row[0], dict) else json.loads(row[0])
     
-ALLOWED_FRONTEND_HOSTS = {"equinoxbot.netlify.app"}  # change if needed
+ALLOWED_FRONTEND_HOSTS = {"equinoxbot.netlify.app"}  
 
 def humanize_remaining(expires_at: datetime, now: datetime) -> str:
     secs = int((expires_at - now).total_seconds())
@@ -364,7 +378,7 @@ def api_subscription(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    discord_id = int(user["id"])  # ✅ int for DB
+    discord_id = int(user["id"])  
 
     active, tier, expires = db_user_is_active(discord_id)
 
@@ -410,7 +424,7 @@ def api_subscription(request: Request):
         "started_at": started_at,
         "expires_at": expires,
         "code_used": code_used,
-        "discord_id": str(discord_id),  # ✅ string for frontend display
+        "discord_id": str(discord_id),  
     }
 
 
@@ -433,17 +447,17 @@ async def logout(request: Request):
     
 @app.get("/auth/discord/login")
 async def discord_login(next: str = "/"):
-    # create a fresh random state token
+    
     state = secrets.token_urlsafe(16)
 
-    # Save where the user should be returned to after OAuth completes.
-    # This is keyed by the state so the callback can pop it.
+    
+    
     sessions[f"oauth_state:{state}"] = next
 
-    # DO NOT mark the state as "used" here — that should happen only when the
-    # callback consumes it. The callback already checks used_oauth_states to
-    # block replay; leave used_oauth_states for consumed states only.
-    #
+    
+    
+    
+    
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": DISCORD_REDIRECT_URI,
@@ -460,7 +474,7 @@ def me(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    # Discord user data from OAuth
+    
     discord_id = str(user["id"])
     active, tier, expires = db_user_is_active(discord_id)
 
@@ -469,7 +483,7 @@ def me(request: Request):
         "username": user["username"],
         "discriminator": user["discriminator"],
         "avatar": user["avatar"],
-        "avatar_url": make_avatar_url(user),  # your existing helper
+        "avatar_url": make_avatar_url(user),  
         "premium": active,
         "tier": tier,
         "expires_at": expires,
@@ -498,11 +512,11 @@ CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{4}(-[A-Za-z0-9]{4}){3}$")
 
 def lock_seconds_for_stage(stage: int) -> int:
     base = 30
-    secs = base * (2 ** (stage - 1))  # 30,60,120,240...
+    secs = base * (2 ** (stage - 1))  
     return min(secs, 3600)
 
 def locked_response(retry_after: int):
-    # Your frontend notification can trigger off status 429 or locked=true
+    
     raise HTTPException(
         status_code=429,
         detail={
@@ -519,7 +533,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    discord_id = int(user["id"])  # ✅ int for DB
+    discord_id = int(user["id"])  
     now = datetime.now(timezone.utc)
 
     pepper = os.getenv("REDEEM_CODE_PEPPER")
@@ -532,7 +546,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
         with get_db() as conn:
             with conn.cursor() as cur:
 
-                # Ensure attempts row exists (supports admin_lock_until too)
+                
                 cur.execute(
                     """
                     INSERT INTO public.redeem_attempts (discord_id, fails, lock_until, admin_lock_until, updated_at)
@@ -544,7 +558,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
                 )
                 fails, lock_until, admin_lock_until = cur.fetchone()
 
-                # Effective lock = later of the two
+                
                 effective_lock_until = None
                 if lock_until and lock_until > now:
                     effective_lock_until = lock_until
@@ -587,7 +601,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
 
                     raise HTTPException(status_code=400, detail="Redeem failed. Please try another code.")
 
-                # Validate code input (invalid format counts as fail)
+                
                 if not code_input:
                     record_fail_and_raise()
 
@@ -603,7 +617,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
 
                 code_hash = hashlib.sha256((pepper + code).encode("utf-8")).hexdigest()
 
-                # Fetch code row locked
+                
                 cur.execute(
                     """
                     SELECT id, tier, used_at
@@ -619,7 +633,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
 
                 code_id, tier, _used_at = row
 
-                # Lock current subscription row
+                
                 cur.execute(
                     """
                     SELECT tier, expires_at
@@ -641,7 +655,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
                 if current_expires is not None and current_expires > now:
                     base_time = current_expires
 
-                # Compute new tier/expiry (EXTEND logic)
+                
                 if tier == "lifetime" or current_tier == "lifetime":
                     new_tier = "lifetime"
                     new_expires = None
@@ -654,13 +668,13 @@ def redeem_code(request: Request, body: dict = Body(...)):
                 else:
                     raise HTTPException(status_code=500, detail="Invalid tier in DB")
 
-                # Mark code used
+                
                 cur.execute(
                     "UPDATE redeem_codes SET used_at=%s, used_by_discord_id=%s WHERE id=%s",
                     (now, discord_id, code_id),
                 )
 
-                # Log redemption (store resulting expiry)
+                
                 cur.execute(
                     """
                     INSERT INTO redemptions
@@ -670,7 +684,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
                     (discord_id, tier, now, new_expires, code_hash, code_id),
                 )
 
-                # Upsert subscription
+                
                 cur.execute(
                     """
                     INSERT INTO user_subscriptions
@@ -685,7 +699,7 @@ def redeem_code(request: Request, body: dict = Body(...)):
                     (discord_id, new_tier, now, new_expires, code_hash),
                 )
 
-                # Success: reset attempts (also clear admin_lock? no—leave admin_lock as-is)
+                
                 cur.execute(
                     """
                     UPDATE public.redeem_attempts
@@ -727,18 +741,46 @@ async def prune_expired_subs_loop():
         except Exception as e:
             print("[prune] error:", repr(e))
 
-        # sleep 24h
+        
         await asyncio.sleep(60 * 60 * 24)
 
+def require_csrf(request: Request):
+    session_id = request.cookies.get("session_id")
+    csrf_cookie = request.cookies.get("csrf_token")
+    csrf_header = request.headers.get("x-csrf-token")
+    print("[CSRF] cookie:", bool(csrf_cookie), "header:", bool(csrf_header))
+    if not csrf_cookie or not csrf_header or csrf_cookie != csrf_header:
+        print("[CSRF] failed")
+        raise HTTPException(403, "CSRF check failed")
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    if not csrf_cookie or not csrf_header:
+        raise HTTPException(status_code=403, detail="Missing CSRF token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT csrf_token FROM public.web_sessions WHERE session_id = %s",
+                (session_id,),
+            )
+            row = cur.fetchone()
+
+    if not row or row[0] != csrf_header or csrf_cookie != csrf_header:
+        raise HTTPException(status_code=403, detail="CSRF validation failed")        
+        
 DEV_DISCORD_ID = "857932717681147954"
 
-def require_dev(request: Request) -> int:
+def require_dev(request: Request) -> str:
     user = get_user_from_session(request)
     if not user:
-        raise HTTPException(status_code=401, detail="Not logged in")
+        print("[DEV] no session user")
+        raise HTTPException(401, "Not logged in")
     discord_id = str(user["id"])
+    print("[DEV] user id:", discord_id)
     if discord_id != DEV_DISCORD_ID:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        print("[DEV] forbidden: not dev")
+        raise HTTPException(403, "Forbidden")
     return discord_id
 
 @app.post("/api/admin/import-codes")
@@ -765,7 +807,7 @@ async def admin_import_codes(
             for raw in lines:
                 code = raw.strip()
 
-                # allow raw 16 -> dashed
+                
                 if "-" not in code:
                     if not re.fullmatch(r"^[A-Za-z0-9]{16}$", code):
                         bad += 1
@@ -931,8 +973,8 @@ def admin_grant(request: Request, body: dict = Body(...)):
     else:
         expires = now + timedelta(days=365)
 
-    # store a "code hash" label so your UI shows code used
-    # (this does NOT need to be a real redeemable code)
+    
+    
     last_code_hash = hashlib.sha256(("ADMIN:" + code_label).encode("utf-8")).hexdigest()
 
     with get_db() as conn:
@@ -1015,7 +1057,7 @@ def admin_reduce(request: Request, body: dict = Body(...)):
 
             current_tier, current_expires = row
 
-            # lifetime (or null expires) means revoke on reduce
+            
             if current_tier == "lifetime" or current_expires is None or tier == "lifetime":
                 cur.execute("DELETE FROM public.user_subscriptions WHERE discord_id=%s", (discord_id,))
                 conn.commit()
@@ -1028,13 +1070,13 @@ def admin_reduce(request: Request, body: dict = Body(...)):
 
             new_expires = current_expires - delta
 
-            # if reduction wipes remaining time => revoke
+            
             if new_expires <= now:
                 cur.execute("DELETE FROM public.user_subscriptions WHERE discord_id=%s", (discord_id,))
                 conn.commit()
                 return {"ok": True, "message": "Reduction exceeded remaining time -> revoked subscription."}
 
-            # keep tier as-is; just reduce expiry
+            
             cur.execute(
                 """
                 UPDATE user_subscriptions
@@ -1110,7 +1152,7 @@ def admin_unlock(request: Request, body: dict = Body(...)):
     now = datetime.now(timezone.utc)
     with get_db() as conn:
         with conn.cursor() as cur:
-            # if no row OR admin lock not active -> error
+            
             cur.execute(
                 """
                 SELECT admin_lock_until
@@ -1160,7 +1202,7 @@ def admin_redeem_locks(request: Request):
 
     locks = []
     for discord_id, fails, lock_until, admin_lock_until, updated_at in rows:
-        # effective lock = whichever ends later
+        
         effective = None
         lock_type = None
 
@@ -1185,10 +1227,10 @@ def admin_redeem_locks(request: Request):
 
     return {"ok": True, "locks": locks}
 
-CODE_ALPHABET = "qwertyuiopasdfghjklzxcvbnmABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no confusing chars
+CODE_ALPHABET = "qwertyuiopasdfghjklzxcvbnmABCDEFGHJKLMNPQRSTUVWXYZ23456789"  
 
 def generate_code_raw() -> str:
-    # 16 chars
+    
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(16))
 
 def normalize_code(raw: str) -> str:
@@ -1223,7 +1265,7 @@ def admin_generate_codes(request: Request, body: dict = Body(...)):
         "token": token,
         "tier": tier,
         "amount": amount,
-        "codes": codes,  # plaintext returned once
+        "codes": codes,  
     }
 
 @app.post("/api/admin/import-generated")
@@ -1234,7 +1276,7 @@ def admin_import_generated(request: Request, body: dict = Body(...)):
     if not token or token not in pending_batches:
         raise HTTPException(400, detail="Invalid/expired batch token")
 
-    batch = pending_batches.pop(token)  # one-time use
+    batch = pending_batches.pop(token)  
     tier = batch["tier"]
     codes = batch["codes"]
 
